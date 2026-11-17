@@ -1,9 +1,12 @@
 import { DEFAULT_SETTINGS, AppError, cleanRequest, validateSettings, endpointFrom, analysisKey, requestPolicy } from './lib/core.js';
 import { migrateSettings, validateConfiguration, resolveSettings, publicProviders, preferences } from './lib/providers.js';
+import { modelSettings, modelsEndpoint, modelsKey, queryModels } from './lib/models.js';
 import { queryAI } from './lib/ai.js';
 
 const pending = new Map();
+const modelPending = new Map(), modelCache = new Map();
 const panelRequests = new Map();
+const panelOwners = new Map();
 let panelSequence = 0;
 let writeQueue = Promise.resolve();
 // Keys and saved readings are available only to trusted extension pages / worker.
@@ -17,6 +20,8 @@ function openReadingPanel(message, sender, reply) {
     if (sender.id !== chrome.runtime.id || !sender.tab || !Number.isInteger(sender.tab.windowId)) throw new AppError('DENIED', '此入口仅用于当前网页的阅读侧栏。');
     const request = cleanRequest(message);
     const version = Date.now() * 1000 + (++panelSequence % 1000);
+    const lease = { tabId: sender.tab.id, version };
+    panelOwners.set(sender.tab.windowId, lease);
     // Invoke synchronously in the user-gesture message listener. Awaiting storage
     // before open() can lose Chrome's transient user activation.
     const opening = chrome.sidePanel.open({ tabId: sender.tab.id });
@@ -25,21 +30,52 @@ function openReadingPanel(message, sender, reply) {
       const { settingsRevision = 'initial' } = await chrome.storage.local.get('settingsRevision');
       if (!settings.enabled) throw new AppError('DISABLED', '划词功能已暂停。');
       if (!settings.includeContext) request.context = '';
-      await chrome.storage.session.set({ [`readingPanel:${sender.tab.windowId}`]: {
-        ...request, id: crypto.randomUUID(), version, tabId: sender.tab.id,
-        providerId: settings.providerId, thinkingEnabled: requestPolicy(settings).thinking, fontSize: settings.fontSize, revision: settingsRevision,
-        force: message.force === true
-      } });
+      await serial(async () => {
+        if (panelOwners.get(sender.tab.windowId) !== lease) throw new AppError('PANEL', '页面已切换。');
+        await chrome.storage.session.set({ [`readingPanel:${sender.tab.windowId}`]: {
+          ...request, id: crypto.randomUUID(), version, tabId: sender.tab.id,
+          providerId: settings.providerId, thinkingEnabled: requestPolicy(settings).thinking, fontSize: settings.fontSize, revision: settingsRevision,
+          force: message.force === true
+        } });
+      });
     });
-    Promise.all([opening, storing]).then(async () => {
+    Promise.all([opening, storing]).then(() => serial(async () => {
+      if (panelOwners.get(sender.tab.windowId) !== lease) throw new AppError('PANEL', '页面已切换。');
       await chrome.storage.session.set({ [`readingPanelOpen:${sender.tab.windowId}`]: true });
       reply({ ok: true, data: { opened: true } });
-    }).catch(() => reply({ ok: false, error: { code: 'PANEL', message: '当前无法打开浏览器侧栏，将使用网页浮窗。' } }));
+    })).catch(() => reply({ ok: false, error: { code: 'PANEL', message: '当前无法打开浏览器侧栏，将使用网页浮窗。' } }));
   } catch {
     reply({ ok: false, error: { code: 'PANEL', message: '当前无法打开浏览器侧栏，将使用网页浮窗。' } });
   }
   return true;
 }
+
+// A global Chrome panel must not carry one page's readings onto another page.
+// Session handoff remains window-local, with an explicit owning tab and an open
+// lease so late open() / settings work cannot repopulate a retired page.
+function retirePanel(windowId, tabId, navigating = false) {
+  const matches = source => navigating ? source === tabId : source !== tabId;
+  const lease = panelOwners.get(windowId);
+  if (lease && !matches(lease.tabId)) return Promise.resolve();
+  if (lease) panelOwners.delete(windowId);
+  return serial(async () => {
+    const key = `readingPanel:${windowId}`, openKey = `readingPanelOpen:${windowId}`;
+    const payload = (await chrome.storage.session.get(key))[key];
+    if (!lease && (!payload || !matches(payload.tabId))) return;
+    if (panelOwners.has(windowId)) return; // A newer explicit query owns the panel.
+    for (const [id, ownerWindow] of panelRequests) if (ownerWindow === windowId) pending.get(id)?.abort();
+    await chrome.storage.session.remove([key, openKey]);
+    if (chrome.sidePanel.close) await chrome.sidePanel.close({ windowId }).catch(() => {});
+    else await chrome.sidePanel.setOptions({ enabled: false }).catch(() => {});
+    const sourceTab = payload?.tabId ?? lease?.tabId;
+    if (Number.isInteger(sourceTab)) await chrome.tabs.sendMessage(sourceTab, { type: 'READING_PANEL_CLOSED' }).catch(() => {});
+  });
+}
+chrome.tabs.onActivated?.addListener(info => { retirePanel(info.windowId, info.tabId).catch(() => {}); });
+chrome.tabs.onUpdated?.addListener((tabId, info, tab) => {
+  if (info.status === 'loading' || info.url) retirePanel(tab.windowId, tabId, true).catch(() => {});
+});
+chrome.tabs.onRemoved?.addListener((tabId, info) => { retirePanel(info.windowId, tabId, true).catch(() => {}); });
 
 chrome.sidePanel?.onClosed?.addListener(info => {
   chrome.storage.session.remove(`readingPanelOpen:${info.windowId}`).catch(() => {});
@@ -47,6 +83,7 @@ chrome.sidePanel?.onClosed?.addListener(info => {
   chrome.tabs.query({ windowId: info.windowId }).then(tabs => Promise.allSettled(tabs.map(tab => chrome.tabs.sendMessage(tab.id, { type: 'READING_PANEL_CLOSED' })))).catch(() => {});
 });
 chrome.windows?.onRemoved?.addListener(windowId => {
+  panelOwners.delete(windowId);
   chrome.storage.session.remove([`readingPanel:${windowId}`, `readingPanelOpen:${windowId}`]).catch(() => {});
 });
 
@@ -80,6 +117,7 @@ async function getConfiguration() {
 }
 async function getSettings(providerId) { return resolveSettings(await getConfiguration(), providerId); }
 async function storeConfiguration(configuration) {
+  modelCache.clear();
   await chrome.storage.local.set({ configuration, settingsRevision: crypto.randomUUID() });
   await chrome.storage.session.remove('analysisCache');
 }
@@ -137,10 +175,37 @@ async function analyze(message, sender) {
   } finally { clearTimeout(timeout); clearInterval(keepAlive); if (pending.get(key) === controller) { pending.delete(key); panelRequests.delete(key); } }
 }
 
+async function listModels(message, sender) {
+  if (sender.url?.split('?')[0] !== chrome.runtime.getURL('options.html')) throw new AppError('DENIED', '模型列表只能在拾文设置页获取。');
+  const settings = modelSettings(message.settings);
+  const key = `${owner(sender)}:${String(message.id).slice(0, 100)}`;
+  if (modelPending.size >= 4 && !modelPending.has(key)) throw new AppError('BUSY', '正在获取其他模型列表，请稍后重试。');
+  const controller = new AbortController(); modelPending.get(key)?.abort(); modelPending.set(key, controller);
+  try {
+    const { origin } = modelsEndpoint(settings.baseUrl);
+    if (!(await chrome.permissions.contains({ origins: [origin] }))) throw new AppError('PERMISSION', '请点击“获取模型列表”并允许访问此接口域名。');
+    const cacheKey = await modelsKey(settings);
+    if (controller.signal.aborted) throw controller.signal.reason;
+    const cached = modelCache.get(cacheKey);
+    if (!message.force && cached && Date.now() - cached.at < 300000) return { ...cached.result, cached: true };
+    const result = await queryModels(settings, controller.signal);
+    if (controller.signal.aborted) throw controller.signal.reason;
+    modelCache.delete(cacheKey); modelCache.set(cacheKey, { at: Date.now(), result });
+    while (modelCache.size > 20) modelCache.delete(modelCache.keys().next().value);
+    return { ...result, cached: false };
+  } finally { if (modelPending.get(key) === controller) modelPending.delete(key); }
+}
+
 async function handle(message, sender) {
   await ready;
   if (sender.id !== chrome.runtime.id) throw new AppError('DENIED', '无权访问。');
   switch (message?.type) {
+    case 'PREPARE_READING_PANEL': {
+      if (!sender.tab) throw new AppError('DENIED', '此操作仅用于网页划词。');
+      if (!chrome.sidePanel.close) await chrome.sidePanel.setOptions({ enabled: true });
+      return true;
+    }
+    case 'PAGE_LEFT': if (sender.tab && (sender.frameId ?? 0) === 0) await retirePanel(sender.tab.windowId, sender.tab.id, true); return true;
     case 'PUBLIC_SETTINGS': {
       const configuration = await getConfiguration();
       const settings = configuration.providers.length ? resolveSettings(configuration) : { ...DEFAULT_SETTINGS, ...configuration.preferences };
@@ -176,6 +241,8 @@ async function handle(message, sender) {
   }
   if (!trusted(sender)) throw new AppError('DENIED', '此操作只能在扩展页面进行。');
   switch (message.type) {
+    case 'LIST_MODELS': return listModels(message, sender);
+    case 'CANCEL_MODELS': modelPending.get(`${owner(sender)}:${String(message.id).slice(0, 100)}`)?.abort(); return true;
     case 'GET_CONFIGURATION': return getConfiguration();
     case 'GET_SETTINGS': return getSettings(message.providerId);
     case 'SET_CONFIGURATION': {

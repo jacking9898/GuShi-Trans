@@ -4,7 +4,13 @@ import { resultToText } from './lib/core.js';
 const $ = id => document.getElementById(id);
 const views = new Map(), scrollPositions = new Map();
 let query = null, entry = null, error = null, mode = 'translate', activeId = null, generation = 0, windowKey, panelWindowId, lastVersion = 0;
-let picker, selectedProviderId, providerData;
+let picker, selectedProviderId, providerData, clearedPages = 0;
+const initialPanelBody = $('panel-body').firstElementChild.cloneNode(true);
+function clearPage() {
+  ++clearedPages; cancel(); stopSpeech(); query = null; entry = null; error = null; views.clear(); scrollPositions.clear();
+  $('panel-body').replaceChildren(initialPanelBody.cloneNode(true));
+  $('panel-body').querySelector('#panel-start').onclick = () => chrome.tabs.create({ url: chrome.runtime.getURL('reader.html?wide=1') });
+}
 function updateProviders(data) {
   providerData = data; selectedProviderId = data.activeProviderId; picker?.update(data);
   if (data.fontSize) document.body.classList.toggle('sw-large', data.fontSize === 'large');
@@ -78,7 +84,9 @@ function acceptQuery(value, local = false) {
 }
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'session' && windowKey && changes[windowKey]?.newValue) acceptQuery(changes[windowKey].newValue);
+  if (area === 'session' && windowKey && changes[windowKey]) {
+    if (changes[windowKey].newValue) acceptQuery(changes[windowKey].newValue); else clearPage();
+  }
   if (area === 'local' && changes.configuration) {
     send('PUBLIC_SETTINGS').then(updateProviders).catch(showError);
     // Existing results and active requests keep their own provider provenance.
@@ -91,6 +99,10 @@ try {
   const settings = await send('PUBLIC_SETTINGS');
   picker = providerPicker(settings, updateProviders); document.querySelector('.panel-intro').after(picker.root); updateProviders(settings);
   const currentWindow = await chrome.windows.getCurrent(); panelWindowId = currentWindow.id; windowKey = `readingPanel:${currentWindow.id}`;
+  const initialPage = clearedPages;
   const values = await chrome.storage.session.get(windowKey);
-  if (values[windowKey]) acceptQuery(values[windowKey]);
+  if (values[windowKey]) {
+    const activeTabs = await chrome.tabs.query({ active: true, windowId: currentWindow.id });
+    if (initialPage === clearedPages && activeTabs[0]?.id === values[windowKey].tabId) acceptQuery(values[windowKey]);
+  }
 } catch (value) { showError(Object.assign(new Error('无法读取待查文字，请重新在网页中划词。'), { code: 'PANEL' })); }

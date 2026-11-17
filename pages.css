@@ -151,3 +151,11 @@ body { margin: 0; }
 .provider-actions { display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 20px; }
 @media (max-width: 480px) { .provider-editor { padding: 12px; } }
 .provider-add select { min-height: 44px; border: 1px solid #d8ddcf; border-radius: 6px; padding: 10px 12px; color: var(--sw-ink); background: var(--sw-white); font: inherit; font-size: 13px; }
+
+.model-fetch-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 10px; }
+.model-fetch-row .field-help { margin: 0; flex: 1; min-width: 150px; }
+.model-browser { margin-top: 14px; border: 1px solid var(--sw-line); padding: 12px; border-radius: 8px; background: #f5f5ef; }
+.field .model-list-label { margin-top: 12px; }
+.field #available-models { height: 152px; padding: 4px; }
+#available-models option { padding: 7px 9px; }
+#models-status.is-error { color: #a24527; }

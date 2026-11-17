@@ -20,8 +20,16 @@ assert(!manifest.host_permissions);
 manifest.host_permissions = ['http://127.0.0.1/*'];
 await writeFile(join(fixture, 'manifest.json'), JSON.stringify(manifest));
 const observedRequests = [];
+let catalogMode = 'normal', catalogCalls = [], releaseCatalog;
 let apiMode = 'normal', calls = [], releaseSlow, aborted = 0;
 const server = createServer(async (req, res) => {
+  if (req.method === 'GET' && req.url === '/v1/models') {
+    catalogCalls.push({ path: req.url, authorization: req.headers.authorization });
+    if (catalogMode === 'slow') { await new Promise(resolve => { releaseCatalog = resolve; }); if (res.destroyed) return; }
+    if (catalogMode === 'unsupported') { res.writeHead(404); res.end('reflected-test-secret-key'); return; }
+    const ids = catalogMode === 'empty' ? [] : req.headers.authorization?.includes('qwen-fake-secret') ? ['qwen-flash', 'qwen-only-model'] : req.headers.authorization?.includes('openai-fake-secret') ? ['gpt-6-luna', 'openai-only-model'] : ['gpt-6-luna', 'gpt-4.1-mini', 'deepseek-flash', 'mock-model', '<img onerror=alert(1)>'];
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ data: ids.map(id => ({ id })) })); return;
+  }
   if (req.method === 'POST' && req.url === '/v1/chat/completions') {
     let raw = ''; for await (const chunk of req) raw += chunk;
     const payload = JSON.parse(raw); calls.push(payload); observedRequests.push({ model: payload.model, authorization: req.headers.authorization, path: req.url });
@@ -72,8 +80,15 @@ try {
   });
   context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
   const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
+  await worker.evaluate(() => { globalThis.__observedPanelCloses = []; chrome.sidePanel.onClosed.addListener(info => globalThis.__observedPanelCloses.push(info)); });
   const extensionId = new URL(worker.url()).host;
   const extension = `chrome-extension://${extensionId}`;
+  async function backgroundPage(url) {
+    const opening = context.waitForEvent('page');
+    await worker.evaluate(url => chrome.tabs.create({ url, active: false }), url);
+    const created = await opening; await created.waitForLoadState(); return created;
+  }
+
   const reader = await context.newPage();
   await reader.goto(`${extension}/reader.html?wide=1`);
   await reader.locator('#setup-banner').waitFor({ state: 'visible' });
@@ -105,6 +120,33 @@ try {
   await options.waitForFunction(() => /设置已保存|尚未授权/.test(document.getElementById('settings-message').textContent), null, { timeout: 10000 });
   assert.match(await options.locator('#settings-message').textContent(), /设置已保存/);
   log('settings save using Chrome permissions API with pre-granted test localhost origin');
+  await options.waitForFunction(() => document.getElementById('models-status').textContent.includes('已获取'));
+  assert.equal(await options.locator('#model').inputValue(), 'mock-model');
+  assert.equal(await options.locator('#dirty').textContent(), '');
+  assert.equal(await options.locator('#available-models option').count(), 4);
+  const modelDiscoveryPosts = calls.length;
+  await options.locator('#model-search').fill('gpt-6');
+  assert.equal(await options.locator('#available-models option').count(), 1);
+  assert.equal(await options.locator('#dirty').textContent(), '');
+  await options.locator('#available-models').selectOption('gpt-6-luna');
+  assert.equal(await options.locator('#model').inputValue(), 'gpt-6-luna');
+  assert.match(await options.locator('#dirty').textContent(), /未保存/);
+  assert.equal(calls.length, modelDiscoveryPosts);
+  await options.locator('#model').fill('mock-model'); await options.locator('#save').click();
+  await options.waitForFunction(() => document.getElementById('settings-message').textContent.includes('设置已保存'));
+  await options.waitForFunction(() => document.getElementById('models-status').textContent.includes('已获取'));
+  catalogMode = 'unsupported'; await options.locator('#fetch-models').click();
+  await options.waitForFunction(() => document.getElementById('models-status').textContent.includes('未提供模型列表'));
+  assert(!(await options.locator('#models-status').textContent()).includes('reflected-test-secret-key'));
+  assert.equal(await options.locator('#model').inputValue(), 'mock-model');
+  catalogMode = 'empty'; await options.locator('#fetch-models').click();
+  await options.waitForFunction(() => document.getElementById('models-status').textContent.includes('未返回可用模型'));
+  catalogMode = 'normal'; await options.locator('#fetch-models').click();
+  await options.waitForFunction(() => document.getElementById('models-status').textContent.includes('已获取'));
+  await options.screenshot({ path: join(screenshotDir, 'model-discovery.png'), fullPage: true });
+  await options.locator('.model-field').screenshot({ path: join(screenshotDir, 'model-picker.png') });
+  log('model discovery loads automatically, supports search and selection, preserves manual input and handles empty or unsupported catalogs without generation calls');
+
   const connectionCalls = calls.length;
   for (let i = 1; i <= 2; i++) {
     await options.locator('#test-connection').click();
@@ -270,8 +312,7 @@ try {
   // The native side-panel WebContents is not exposed as a Playwright page in
   // headless Chrome. Inspect the same renderer in a test tab after that request,
   // then explicitly regenerate once to test mode changes during slow generation.
-  const panelRenderer = await context.newPage(); await panelRenderer.setViewportSize({ width: 440, height: 1000 });
-  await panelRenderer.goto(`${extension}/panel.html`);
+  const panelRenderer = await backgroundPage(`${extension}/panel.html`); await panelRenderer.setViewportSize({ width: 440, height: 1000 });
   await panelRenderer.getByText(`测试接口译注：${panelText}`, { exact: true }).waitFor();
   assert.equal(calls.length, nativeCalls + 1);
   const nativeAborts = aborted; apiMode = 'slow';
@@ -299,8 +340,52 @@ try {
   await shadow(root => [...root.querySelectorAll('.sw-toolbar-button')].find(b => b.textContent === '字词解释').click());
   await waitShadow(root => !!root.querySelector('.sw-result') && !root.querySelector('.sw-floating-dialog').hidden, 'narrow-screen floating fallback');
   assert.equal(calls.length, nativeCalls + 2);
-  await panelRenderer.close();
-  log('native side panel handles narrowed article viewports, reuses requests and returns to floating mode after close on narrow screens');
+  // Real Chrome tab activation and navigation must retire the global panel.
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await shadow(root => root.querySelector('[aria-label="关闭译注（Esc）"]').click());
+  await select(); await waitShadow(root => root.querySelector('.sw-selection-toolbar')?.hidden === false, 'lifecycle toolbar');
+  await shadow(root => root.querySelector('.sw-toolbar-button').click());
+  await page.waitForFunction(() => document.querySelector('shiwen-reader')?.dataset.layout === 'sidepanel');
+  await panelRenderer.locator('.sw-result').waitFor();
+  const sourceTabId = await worker.evaluate(async windowId => (await chrome.storage.session.get(`readingPanel:${windowId}`))[`readingPanel:${windowId}`].tabId, nativeWindowId);
+  const lifecycleCalls = calls.length;
+  const closesBeforeSwitch = await worker.evaluate(() => globalThis.__observedPanelCloses.length);
+  const otherTab = await worker.evaluate(async url => chrome.tabs.create({ url, active: true }), `${base}/other-tab`);
+  await panelRenderer.waitForFunction(async windowId => !(await chrome.storage.session.get(`readingPanel:${windowId}`))[`readingPanel:${windowId}`], nativeWindowId);
+  await panelRenderer.locator('.sw-result').waitFor({ state: 'hidden' });
+  const nativeCloseStart = Date.now();
+  while (await worker.evaluate(() => globalThis.__observedPanelCloses.length) <= closesBeforeSwitch && Date.now() - nativeCloseStart < 10000) await new Promise(resolve => setTimeout(resolve, 25));
+  assert(await worker.evaluate(() => globalThis.__observedPanelCloses.length) > closesBeforeSwitch, 'Chrome must confirm that its native panel closed on tab switch');
+  assert.equal(calls.length, lifecycleCalls);
+  await worker.evaluate(async id => chrome.tabs.update(id, { active: true }), sourceTabId);
+  await worker.evaluate(async id => chrome.tabs.remove(id), otherTab.id);
+  assert.equal(await panelRenderer.locator('.sw-result').count(), 0);
+  await select(); await waitShadow(root => root.querySelector('.sw-selection-toolbar')?.hidden === false, 'return-to-source toolbar');
+  await shadow(root => root.querySelector('.sw-toolbar-button').click());
+  await panelRenderer.locator('.sw-result').waitFor();
+  assert.equal(calls.length, lifecycleCalls);
+  await page.goto(`${base}/new-article`);
+  await panelRenderer.waitForFunction(async windowId => !(await chrome.storage.session.get(`readingPanel:${windowId}`))[`readingPanel:${windowId}`], nativeWindowId);
+  await panelRenderer.locator('.sw-result').waitFor({ state: 'hidden' });
+  assert.equal(calls.length, lifecycleCalls);
+
+  await panelRenderer.close(); // Only the real native renderer observes the next uncached query.
+  apiMode = 'slow'; const beforeNavigationAbort = aborted;
+  const leavingText = '离开当前网页时取消这条译注';
+  await page.locator('#selection').evaluate((node, text) => { node.textContent = text; }, leavingText);
+  await select(); await waitShadow(root => root.querySelector('.sw-selection-toolbar')?.hidden === false, 'pending-navigation toolbar');
+  await shadow(root => root.querySelector('.sw-toolbar-button').click());
+  await waitForCalls(lifecycleCalls + 1);
+  await page.goto(`${base}/after-navigation`);
+  const abortStart = Date.now();
+  while (aborted === beforeNavigationAbort && Date.now() - abortStart < 10000) await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(aborted, beforeNavigationAbort + 1);
+  releaseSlow(); apiMode = 'normal';
+  assert.equal(await worker.evaluate(async text => {
+    const { analysisCache = [] } = await chrome.storage.session.get('analysisCache'); return analysisCache.some(x => x.entry.text === text);
+  }, leavingText), false);
+  await page.setViewportSize({ width: 800, height: 1000 });
+  log('native side panel reuses mode requests; real tab switches and same-tab navigation clear old readings, close the panel and cancel in-flight work');
 
   await reader.goto(`${extension}/reader.html?wide=1`);
   apiMode = 'reasoning-limit'; const exhaustedCalls = calls.length;
@@ -339,6 +424,27 @@ try {
     assert.equal(await options.locator('#api-key').inputValue(), p.key);
     assert.equal(await options.locator('#model').inputValue(), p.model);
   }
+  await options.waitForFunction(() => document.getElementById('models-status').textContent.includes('已获取'));
+  assert.equal(await options.locator('#available-models option').first().textContent(), 'qwen-flash');
+  const qwenCatalogCalls = catalogCalls.length;
+  await options.locator(`[data-provider-id="${profiles[0].id}"]`).click();
+  await options.waitForFunction(() => document.getElementById('models-status').textContent.includes('已获取'));
+  assert(await options.locator('#available-models option[value="openai-only-model"]').count());
+  assert.equal(await options.locator('#available-models option[value="qwen-only-model"]').count(), 0);
+  if (catalogCalls.length > qwenCatalogCalls) assert.equal(catalogCalls.at(-1).authorization, 'Bearer openai-fake-secret');
+  const beforeReturnToQwen = catalogCalls.length;
+  await options.locator(`[data-provider-id="${profiles[1].id}"]`).click();
+  await options.waitForFunction(() => document.getElementById('models-status').textContent.includes('已获取'));
+  assert.equal(catalogCalls.length, beforeReturnToQwen, 'switching back reuses a per-key catalog cache');
+  catalogMode = 'slow'; await options.locator('#fetch-models').click();
+  await options.waitForFunction(() => document.getElementById('fetch-models').textContent.includes('获取中'));
+  // Wait for the server to own the pending request before switching profiles.
+  while (!releaseCatalog) await new Promise(resolve => setTimeout(resolve, 10));
+  await options.locator(`[data-provider-id="${profiles[0].id}"]`).click(); releaseCatalog(); catalogMode = 'normal';
+  await options.waitForFunction(() => document.getElementById('models-status').textContent.includes('已获取'));
+  assert(await options.locator('#available-models option[value="openai-only-model"]').count());
+  assert.equal(await options.locator('#available-models option[value="qwen-only-model"]').count(), 0);
+  log('model catalogs isolate provider keys and cache entries; late responses cannot overwrite another provider');
   await options.screenshot({ path: join(screenshotDir, 'multiple-providers.png'), fullPage: true });
   log('DeepSeek, OpenAI and Qwen preset profiles save independently and survive reload');
 
@@ -387,7 +493,12 @@ try {
   await waitShadow(root => root.querySelector('.sw-provider-source')?.textContent.includes('千问 试读'), 'floating regenerated provider provenance');
   assert.equal(calls.length, floatingProviderCalls + 1);
 
-  const providerPanel = await context.newPage(); await providerPanel.goto(`${extension}/panel.html`);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await shadow(root => root.querySelector('[aria-label="关闭译注（Esc）"]').click());
+  await select(); await waitShadow(root => root.querySelector('.sw-selection-toolbar')?.hidden === false, 'provider-panel toolbar');
+  await shadow(root => root.querySelector('.sw-toolbar-button').click());
+  await page.waitForFunction(() => document.querySelector('shiwen-reader')?.dataset.layout === 'sidepanel');
+  const providerPanel = await backgroundPage(`${extension}/panel.html`);
   await providerPanel.locator('.sw-provider-select').waitFor();
   // The stored initial panel query may need one lookup; wait for its result.
   await providerPanel.locator('.sw-result').waitFor();
@@ -439,7 +550,7 @@ try {
   assert.deepEqual(errors, [], 'No uncaught browser errors');
   console.log(`\nBrowser integration checks passed. Screenshots: ${screenshotDir}`);
 } finally {
-  releaseSlow?.(); if (context) await context.close();
+  releaseSlow?.(); releaseCatalog?.(); if (context) await context.close();
   server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
   await rm(profile, { recursive: true, force: true }); await rm(fixture, { recursive: true, force: true });
 }

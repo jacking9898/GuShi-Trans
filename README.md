@@ -2,7 +2,17 @@
 
 一个无需构建、可直接加载的 Chrome Manifest V3 扩展。像翻译插件一样划选文字，读懂古诗词、文言文、生字与生词。
 
-[下载已发布的 v1.0.0 插件安装包](https://github.com/jacking9898/GuShi-Trans/releases/download/v1.0.0/shiwen-1.0.0.zip) · [隐私说明](PRIVACY.md) · [验证记录](docs/VERIFICATION.md)
+[下载已发布的 v1.0.6 插件安装包](https://github.com/jacking9898/GuShi-Trans/releases/download/v1.0.6/shiwen-1.0.6.zip) · [隐私说明](PRIVACY.md) · [验证记录](docs/VERIFICATION.md)
+
+## v1.0.6 自动模型列表与侧栏页面归属
+
+- 设置页填好地址与 Key 后，对已授权的接口自动读取模型列表；也可点击「获取 / 刷新模型列表」授权并主动刷新。无需先填写或保存模型，列表支持搜索与选择，也始终保留手动输入。
+- OpenAI / DeepSeek / 自定义兼容服务读取对应前缀下的 `/models`；百炼官方域名使用同一主机的 `/api/v1/models`，按页读取原生模型目录。列表只代表服务返回的候选，不保证当前 Key 可调用或每个模型都支持文字译注，可用测试连接核对。
+- 模型目录按接口与 Key 隔离，在后台内存中缓存 5 分钟；不自动发送诗文生成请求，不自动替换已填模型。换配置、改 Key / 地址时清除当前选择器，迟到结果不会覆盖新配置；不支持目录、权限错误、空列表等情况均保留手动填写入口。
+- 修复侧栏跨页残留：切换到其他标签页、原标签导航、离开 / 关闭原页面时，清空旧选文并收起侧栏，取消尚未完成的侧栏请求。回到原页面不会自动请求，重新划词仍可复用成功缓存。其他窗口及无关后台标签的加载不清空当前阅读。
+- 不增加浏览历史权限，不保存模型列表原始响应或页面地址。Chrome 141 以下没有原生 `close()` 时，通过禁用全局侧栏收起，下一次划词前恢复可用状态。
+
+模型接口依据：[OpenAI](https://developers.openai.com/api/reference/resources/models/methods/list)、[DeepSeek](https://api-docs.deepseek.com/api/list-models/)、[百炼](https://help.aliyun.com/en/model-studio/list-models)。侧栏行为依据：[Chrome Side Panel API](https://developer.chrome.com/docs/extensions/reference/api/sidePanel)。
 
 ## v1.0.5 OpenAI 参数兼容与错误提示
 

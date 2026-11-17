@@ -1,8 +1,10 @@
 import { send, icon, el } from './lib/ui.js';
 import { endpointFrom, supportsThinking } from './lib/core.js';
+import { modelSettings } from './lib/models.js';
 import { PRESETS, newProvider, validateConfiguration } from './lib/providers.js';
 const $ = id => document.getElementById(id);
 let configuration, savedConfiguration, editingId, loadedProfile, busy = false;
+let modelGeneration = 0, activeModelId = null, modelTimer, modelIds = [];
 $('privacy-icon').append(icon('leaf', 18));
 function message(text, error = false) { $('settings-message').textContent = text; $('settings-message').classList.toggle('is-error', error); }
 function profileValues() {
@@ -19,6 +21,66 @@ function protectKey() {
     }
   } catch { /* Validation on save handles incomplete addresses. */ }
 }
+function resetModels() {
+  ++modelGeneration; clearTimeout(modelTimer);
+  if (activeModelId) send('CANCEL_MODELS', { id: activeModelId }).catch(() => {});
+  activeModelId = null; modelIds = [];
+  $('model-browser').hidden = true; $('available-models').replaceChildren(); $('model-search').value = '';
+  $('fetch-models').disabled = false; $('fetch-models').textContent = '获取模型列表';
+  $('models-status').classList.remove('is-error'); $('models-status').textContent = '填好地址与 Key 后，已授权的接口会自动加载模型。';
+}
+function renderModels() {
+  const query = $('model-search').value.trim().toLowerCase();
+  const filtered = modelIds.filter(id => id.toLowerCase().includes(query));
+  const root = $('available-models'); root.replaceChildren();
+  for (const id of filtered) { const option = el('option', '', id); option.value = id; root.append(option); }
+  if (!filtered.length) { const option = el('option', '', '没有匹配的模型，仍可在上方手动填写'); option.disabled = true; root.append(option); }
+  root.value = $('model').value; // Never silently replace the reader's configured model.
+  $('models-count').textContent = `显示 ${filtered.length} / ${modelIds.length} 个模型`;
+}
+function queueModels() { clearTimeout(modelTimer); modelTimer = setTimeout(() => fetchModels(false, false), 250); }
+async function fetchModels(manual = false, force = false) {
+  clearTimeout(modelTimer);
+  if (!configuration || !editingId || busy) return;
+  let settings;
+  try { protectKey(); settings = modelSettings(profileValues()); }
+  catch (error) { if (manual) { $('models-status').textContent = error.message; $('models-status').classList.add('is-error'); } return; }
+  if (activeModelId) send('CANCEL_MODELS', { id: activeModelId }).catch(() => {});
+  const token = ++modelGeneration, id = crypto.randomUUID(); activeModelId = id;
+  $('fetch-models').disabled = true; $('fetch-models').textContent = '获取中…';
+  $('models-status').textContent = '正在读取当前服务的模型列表…'; $('models-status').classList.remove('is-error');
+  try {
+    const origins = [endpointFrom(settings.baseUrl).origin];
+    // A new host needs a user gesture. Automatic loads only use already granted hosts.
+    const allowed = manual ? await chrome.permissions.request({ origins }) : await chrome.permissions.contains({ origins });
+    if (token !== modelGeneration) return;
+    if (!allowed) { $('models-status').textContent = '点击“获取模型列表”并允许访问此接口域名后，即可加载。'; return; }
+    const result = await send('LIST_MODELS', { id, settings, force });
+    if (token !== modelGeneration) return;
+    modelIds = result.models; $('model-search').value = ''; renderModels();
+    $('model-browser').hidden = modelIds.length === 0;
+    const missing = modelIds.length && !modelIds.includes($('model').value) ? ' 当前模型不在列表中，已保留原填写值。' : '';
+    $('models-status').textContent = modelIds.length ? `已获取 ${modelIds.length} 个模型${result.cached ? '（最近缓存）' : ''}。${result.truncated ? '列表较长，显示前 2000 个。' : ''}${missing}` : '服务未返回可用模型，可继续手动填写模型 ID。';
+  } catch (error) {
+    if (token !== modelGeneration) return;
+    $('model-browser').hidden = true;
+    $('models-status').textContent = error.code === 'TIMEOUT' ? '获取模型列表超时，可点击重试或手动填写模型 ID。' : error.code === 'NETWORK' ? '未能连接模型列表接口，请检查地址和网络；仍可手动填写。' : error.message;
+    $('models-status').classList.add('is-error');
+  } finally {
+    if (token === modelGeneration) { activeModelId = null; $('fetch-models').disabled = false; $('fetch-models').textContent = '刷新模型列表'; }
+  }
+}
+$('fetch-models').onclick = () => fetchModels(true, true);
+$('model-search').oninput = renderModels;
+$('available-models').onchange = () => {
+  if (!modelIds.includes($('available-models').value)) return;
+  $('model').value = $('available-models').value; updateThinkingControl(); dirty();
+};
+for (const id of ['base-url', 'api-key']) {
+  $(id).addEventListener('input', resetModels);
+  $(id).addEventListener('change', queueModels);
+}
+window.addEventListener('pagehide', resetModels);
 function updateThinkingControl() {
   const supported = supportsThinking(profileValues()); $('thinking-enabled').disabled = !supported;
   if (!supported) $('thinking-enabled').checked = false;
@@ -41,6 +103,7 @@ function renderList() {
   $('delete-key').disabled = !editingId;
 }
 function fillProfile(id) {
+  resetModels();
   editingId = id; const p = configuration.providers.find(p => p.id === id);
   if (!p) { editingId = null; renderList(); return; }
   loadedProfile = structuredClone(p);
@@ -50,6 +113,7 @@ function fillProfile(id) {
   $('json-mode').checked = p.jsonMode; $('thinking-enabled').checked = p.thinkingEnabled;
   updateThinkingControl(); renderList();
   $('test-connection').disabled = !!$('dirty').textContent || !savedConfiguration?.providers.some(x => x.id === id && x.apiKey);
+  queueModels();
 }
 function fill(value) {
   configuration = structuredClone(value); savedConfiguration = structuredClone(value);
@@ -57,7 +121,7 @@ function fill(value) {
   $('enabled').checked = prefs.enabled; $('include-context').checked = prefs.includeContext; $('large-font').checked = prefs.fontSize === 'large'; $('docked-reading').checked = prefs.dockedReading;
   fillProfile(configuration.providers.some(p => p.id === editingId) ? editingId : configuration.activeProviderId);
 }
-$('settings-form').addEventListener('input', dirty);
+$('settings-form').addEventListener('input', event => { if (event.target.id !== 'model-search') dirty(); });
 $('add-provider').onclick = () => {
   if (busy) return;
   if (configuration.providers.length >= 20) { message('最多保存 20 套 AI 配置。', true); return; }
@@ -73,6 +137,7 @@ $('remove-provider').onclick = () => {
   dirty(); fillProfile(configuration.activeProviderId); message('已从列表移除，保存设置后生效。');
 };
 $('provider').onchange = () => {
+  resetModels();
   const preset = PRESETS[$('provider').value];
   $('api-key').value = ''; $('base-url').value = preset.baseUrl; $('model').value = preset.model;
   $('profile-name').value = preset.name; $('thinking-enabled').checked = false; $('json-mode').checked = false;
@@ -114,7 +179,7 @@ $('test-connection').onclick = async () => {
 $('delete-key').onclick = async () => {
   if (busy || !editingId) return;
   try {
-    await send('DELETE_KEY', { providerId: editingId }); $('api-key').value = '';
+    await send('DELETE_KEY', { providerId: editingId }); resetModels(); $('api-key').value = '';
     for (const value of [configuration, savedConfiguration]) { const p = value.providers.find(p => p.id === editingId); if (p) p.apiKey = ''; }
     loadedProfile.apiKey = ''; $('test-connection').disabled = true; renderList(); message('当前配置的本机 API Key 已删除，其他配置不受影响。');
   } catch (error) { message(error.message, true); }

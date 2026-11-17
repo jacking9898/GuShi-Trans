@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "拾文 · 古诗文 AI 译注",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "读懂一字一句。划词翻译古诗文、解释生字生词、查看拼音与出处线索，收藏你的阅读所得。",
   "minimum_chrome_version": "120",
   "permissions": [

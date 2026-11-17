@@ -103,6 +103,7 @@
     if (!settings.enabled || disposed) return;
     if (!dialog.hidden) return;
     selectionData = data;
+    if (settings.dockedReading) await ui.send('PREPARE_READING_PANEL').catch(() => {});
     toolbar.hidden = false;
     const width = toolbar.getBoundingClientRect().width || 320;
     const top = data.rect.bottom + 8;
@@ -195,7 +196,10 @@
   document.addEventListener('scroll', () => { if (toolbar) toolbar.hidden = true; }, { passive: true, capture: true });
   // Local storage is intentionally unavailable in content scripts. Refresh public prefs via worker.
   window.addEventListener('focus', () => { clearTimeout(refreshTimer); refreshTimer = setTimeout(refreshSettings, 80); });
-  window.addEventListener('pagehide', close);
+  function pageLeft() { chrome.runtime.sendMessage({ type: 'PAGE_LEFT' }).catch(() => {}); close(); }
+  window.addEventListener('pagehide', pageLeft);
+  window.addEventListener('popstate', pageLeft);
+  window.addEventListener('hashchange', pageLeft);
   chrome.runtime.onMessage.addListener((message, _sender, reply) => {
     if (message.type === 'READING_PANEL_CLOSED') { settings.sidePanelOpen = false; if (host) delete host.dataset.layout; return; }
     if (message.type !== 'CONTEXT_QUERY') return;
