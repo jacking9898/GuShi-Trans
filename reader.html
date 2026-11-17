@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>拾文 · 一字一句，皆有来处</title>
+  <link rel="icon" href="assets/icon32.png"><link rel="stylesheet" href="styles.css"><link rel="stylesheet" href="pages.css">
+  <script type="module" src="reader.js"></script>
+</head>
+<body class="sw reader-page">
+  <header class="page-header sw-between">
+    <div class="brand-group sw-inline"><span class="sw-seal">拾</span><div><span class="sw-brand-text">拾文</span><p class="brand-caption">古诗文 · 随手读懂</p></div></div>
+    <div class="header-actions sw-inline"><button id="expand" class="sw-icon-button" type="button" aria-label="在新标签页中阅读" title="在新标签页中阅读"></button><button id="settings" class="sw-icon-button" type="button" aria-label="打开设置" title="打开设置"></button></div>
+  </header>
+  <div class="reader-layout">
+    <aside class="reader-aside" aria-label="拾文寄语">
+      <span class="aside-index">SHI WEN / 阅读札记</span>
+      <h1 class="aside-headline">纸上千年，<br><span>读在此刻。</span></h1>
+      <p class="aside-description">从一个不解的字，到一句动人的诗。<br>拾起字词的来处，读懂古人的心事。</p>
+      <div class="aside-stem"></div>
+      <blockquote class="aside-poem">奇文共欣赏，<br>疑义相与析。<cite>陶渊明 ·《移居二首》其一</cite></blockquote>
+      <p class="aside-bottom"><span class="status-dot"></span>慢慢读，自有所得。</p>
+    </aside>
+    <main class="reader-main">
+      <nav class="reader-tabs" aria-label="阅读与收藏"><button class="reader-tab is-active" id="read-tab" type="button" aria-pressed="true">读一段</button><button class="reader-tab" id="saved-tab" type="button" aria-pressed="false">生词笺<span id="saved-count" class="count">0</span></button></nav>
+      <div id="setup-banner" class="setup-banner" hidden><span>让 AI 陪你读古文，先连接一个模型。</span><button class="sw-text-button" id="setup" type="button">去设置 ↗</button></div>
+      <section id="read-view" aria-labelledby="query-heading">
+        <h2 class="reading-title" id="query-heading">此间，有字待解。</h2>
+        <p class="reading-subtitle">一字、一词、一阕诗，都可以从这里开始。</p>
+        <form id="query-form">
+          <div class="query-box"><label for="query">想读懂的字句</label><textarea id="query" rows="3" placeholder="蒹葭苍苍，白露为霜。" spellcheck="false" aria-describedby="query-error"></textarea><div class="query-bottom sw-between"><span id="query-count" class="query-count">0 / 1600</span><span class="sw-muted sw-small">支持古诗词 · 文言文 · 汉字</span></div></div>
+          <div class="query-tools sw-inline"><div class="sw-modebar" role="group" aria-label="查询方式"><button class="sw-mode is-active" type="button" data-mode="translate" aria-pressed="true">白话翻译</button><button class="sw-mode" type="button" data-mode="explain" aria-pressed="false">字词解释</button><button class="sw-mode" type="button" data-mode="appreciate" aria-pressed="false">诗文赏析</button></div><button id="query-submit" class="sw-button sw-primary query-submit" type="submit">读一读 <span aria-hidden="true">↗</span></button></div>
+          <p id="query-error" class="input-error" role="alert"></p>
+        </form>
+        <div id="result-area" class="result-area" role="region" aria-label="译注结果" hidden></div>
+        <div id="welcome">
+          <div class="feature-label">不妨，从这一句读起</div>
+          <article class="sample-card"><p class="sample-quote">行到水穷处，<br>坐看云起时。</p><p class="sample-credit">王维 ·《终南别业》</p><button type="button" id="example" class="sw-text-button">展开一则译注示例 <span aria-hidden="true">↗</span></button></article>
+          <div class="sample-shortcuts" aria-label="试读字词"><button type="button" data-text="彳亍" data-mode="explain">彳亍</button><button type="button" data-text="既来之，则安之。" data-mode="translate">既来之，则安之</button><button type="button" data-text="落霞与孤鹜齐飞，秋水共长天一色。" data-mode="appreciate">落霞与孤鹜齐飞</button></div>
+          <div id="recent" class="recent-list"></div>
+        </div>
+        <footer class="page-footer"><span>网页选中文字，即可唤出拾文。</span><span><kbd class="shortcut-hint">⌘ / Ctrl</kbd> + <kbd class="shortcut-hint">Enter</kbd> 查询</span></footer>
+      </section>
+      <section id="saved-view" hidden aria-label="生词笺">
+        <div class="library-top sw-between"><div><h2 class="reading-title">字里行间的所得</h2><p class="sw-muted sw-small">把读过的字句，留给下次重逢。</p></div><button id="export" class="sw-icon-button" type="button" aria-label="导出生词笺" title="导出生词笺"></button></div>
+        <label class="search-field" for="saved-search"><span id="search-icon"></span><input id="saved-search" type="search" placeholder="查找收藏的字词、诗文" aria-label="查找收藏的字词、诗文"></label>
+        <p id="library-message" class="sw-feedback" role="status"></p><div id="saved-list"></div><div id="saved-detail" class="saved-detail" hidden></div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

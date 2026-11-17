@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>拾文 · 阅读设置</title><link rel="icon" href="assets/icon32.png">
+  <link rel="stylesheet" href="styles.css"><link rel="stylesheet" href="pages.css"><script type="module" src="options.js"></script>
+</head>
+<body class="sw settings-page">
+  <header class="page-header sw-between"><a class="brand-group sw-inline" href="reader.html?wide=1"><span class="sw-seal">拾</span><div><span class="sw-brand-text">拾文</span><p class="brand-caption">古诗文 · 随手读懂</p></div></a><a class="sw-button" href="reader.html?wide=1">回到阅读 <span aria-hidden="true">↗</span></a></header>
+  <div class="settings-shell">
+    <aside class="settings-nav"><span class="nav-section">阅读设置</span><a href="#connection">01 <span>连接 AI</span></a><a href="#preferences">02 <span>阅读偏好</span></a><a href="#privacy">03 <span>数据与隐私</span></a><div class="settings-side-note"><p>工欲善其事，<br>必先利其器。</p><p>连接你熟悉的 AI，<br>让每一次阅读，都有回响。</p></div></aside>
+    <main class="settings-main">
+      <span class="sw-eyebrow">为你的阅读，做一点准备</span><h1 class="settings-title">让古文，离你近一点。</h1><p class="settings-intro">连接 AI 后，选中字句，就能开始一场跨越千年的对话。</p>
+      <form id="settings-form">
+        <section id="connection" class="settings-section"><h2 class="settings-section-title"><span class="section-number">01</span>连接 AI</h2>
+          <div class="field"><label for="provider">接口服务</label><select id="provider"><option value="deepseek">DeepSeek</option><option value="custom">自定义兼容接口</option></select><p class="field-help">支持 Chat Completions 接口，无需搭建额外服务器。</p></div>
+          <div class="field"><label for="base-url">接口地址</label><input id="base-url" type="url" required placeholder="https://api.deepseek.com" autocomplete="off" spellcheck="false" aria-describedby="url-help"><p class="field-help" id="url-help">可填写基础地址（含 /v1 等路径）或完整 /chat/completions 地址。仅本机接口允许 HTTP。</p></div>
+          <div class="field"><label for="model">模型名称</label><input id="model" type="text" required placeholder="deepseek-chat" autocomplete="off" spellcheck="false"><p class="field-help">填写服务商提供的模型 ID，可按你的账号支持情况修改。</p></div>
+          <div class="field"><label for="api-key">API Key</label><div class="password-row"><input id="api-key" type="password" required placeholder="粘贴服务商提供的密钥" autocomplete="off" spellcheck="false" aria-describedby="key-help"><button id="show-key" type="button" aria-label="显示 API Key" aria-pressed="false">显示</button></div><p class="field-help" id="key-help">仅保存在此浏览器的扩展本地存储中，不会同步到云端。切换服务商时请使用对应密钥。</p></div>
+          <div class="notice"><span id="privacy-icon"></span><p>只有主动查询时，选中文字才会发送至你配置的 AI 服务商。API 调用可能产生费用，取决于你的服务商账户。</p></div>
+          <div class="sw-inline" style="margin-top:16px"><button id="test-connection" class="sw-button" type="button">测试已保存的连接 ↗</button><span class="sw-muted sw-small">用“学”查询一次</span></div><div id="test-result" class="settings-test" role="status"></div>
+        </section>
+        <section id="preferences" class="settings-section"><h2 class="settings-section-title"><span class="section-number">02</span>阅读偏好</h2>
+          <div class="preference"><div><label for="enabled">开启网页划词</label><p>选中网页中的中文字词后，显示翻译、解释与赏析工具。不会在输入框或编辑区触发。</p></div><input class="sw-toggle" id="enabled" type="checkbox" role="switch"></div>
+          <div class="preference"><div><label for="include-context">结合附近上下文</label><p>额外发送选区附近的一小段文字（最多 1200 字），辅助辨析多音字、词义和出处。默认关闭。</p></div><input class="sw-toggle" id="include-context" type="checkbox" role="switch"></div>
+          <div class="preference"><div><label for="large-font">放大译注字号</label><p>让白话译文和字词解释更易阅读。</p></div><input class="sw-toggle" id="large-font" type="checkbox" role="switch"></div>
+          <div class="preference"><div><label for="json-mode">严格 JSON 模式</label><p>仅在模型支持时开启。若出现返回格式错误可尝试开启；若接口报参数不支持则关闭。</p></div><input class="sw-toggle" id="json-mode" type="checkbox" role="switch"></div>
+        </section>
+        <div class="settings-actions"><div class="sw-inline"><button id="save" class="sw-button sw-primary" type="submit">保存设置</button><span id="dirty" class="sw-muted sw-small"></span></div><p id="settings-message" class="settings-message" role="status" aria-live="polite"></p></div>
+      </form>
+      <section id="privacy" class="settings-section"><h2 class="settings-section-title"><span class="section-number">03</span>数据与隐私</h2><ul class="privacy-list"><li>密钥不注入网页，不对内容脚本开放，不会导出到生词笺文件。扩展本地存储不是加密保险库。</li><li>最近 20 条译注与最多 200 条收藏保存在本机。可在阅读页清空最近记录、删除收藏或导出生词笺；卸载扩展会删除本地数据。</li><li>不采集浏览历史、页面地址或整页内容，无统计追踪。网页访问权限用于划词，AI 接口访问权限在保存时按域名单独请求。</li><li>AI 提供的出处、典故、引文和字源是待核对线索，不是已检索的字典证据。现代普通话朗读由浏览器 / 系统语音服务提供，是否联网取决于所选语音。</li></ul><button id="delete-key" class="sw-text-button danger-button" type="button">从此浏览器删除 API Key</button></section>
+    </main>
+  </div>
+</body>
+</html>

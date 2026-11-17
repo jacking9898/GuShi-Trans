@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "拾文 · 古诗文 AI 译注",
+  "version": "1.0.0",
+  "description": "读懂一字一句。划词翻译古诗文、解释生字生词、查看拼音与出处线索，收藏你的阅读所得。",
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "contextMenus"],
+  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": {
+    "default_title": "拾文 · 读懂一字一句",
+    "default_popup": "reader.html",
+    "default_icon": { "16": "assets/icon16.png", "32": "assets/icon32.png", "48": "assets/icon48.png", "128": "assets/icon128.png" }
+  },
+  "icons": { "16": "assets/icon16.png", "32": "assets/icon32.png", "48": "assets/icon48.png", "128": "assets/icon128.png" },
+  "options_page": "options.html",
+  "content_scripts": [{
+    "matches": ["http://*/*", "https://*/*"],
+    "js": ["content.js"],
+    "run_at": "document_idle",
+    "all_frames": true
+  }],
+  "web_accessible_resources": [{
+    "resources": ["lib/ui.js", "styles.css"],
+    "matches": ["http://*/*", "https://*/*"]
+  }],
+  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none';" }
+}

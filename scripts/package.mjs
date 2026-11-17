@@ -1,0 +1,12 @@
+import { mkdir, copyFile, cp, rm } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+await mkdir('dist', { recursive: true });
+const target = 'dist/shiwen';
+await rm(target, { recursive: true, force: true });
+await mkdir(target);
+for (const file of ['manifest.json', 'background.js', 'content.js', 'reader.html', 'reader.js', 'options.html', 'options.js', 'styles.css', 'pages.css', 'README.md', 'PRIVACY.md']) await copyFile(file, `${target}/${file}`);
+for (const dir of ['lib', 'assets']) await cp(dir, `${target}/${dir}`, { recursive: true });
+await rm('dist/shiwen-1.0.0.zip', { force: true });
+const result = spawnSync('zip', ['-q', '-r', 'shiwen-1.0.0.zip', 'shiwen'], { cwd: 'dist', stdio: 'inherit' });
+if (result.status !== 0) process.exit(result.status || 1);
+console.log('Ready: dist/shiwen/ and dist/shiwen-1.0.0.zip');
