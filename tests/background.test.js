@@ -4,7 +4,8 @@ import { DEFAULT_SETTINGS } from '../lib/core.js';
 import { EXAMPLE } from '../lib/example.js';
 const id = 'extension-test';
 const storage = {};
-let handler, accessLevel, allow = true, requestBody, requestCount = 0;
+const session = {};
+let handler, accessLevel, allow = true, requestBody, requestCount = 0, panelOpened;
 globalThis.chrome = {
   storage: {
     local: {
@@ -13,11 +14,16 @@ globalThis.chrome = {
       async set(value) { Object.assign(storage, structuredClone(value)); },
       async remove(key) { delete storage[key]; }
     },
-    session: { async get() { return {}; }, async remove() {} }
+    session: {
+      async get(key) { return key in session ? { [key]: structuredClone(session[key]) } : {}; },
+      async set(value) { Object.assign(session, structuredClone(value)); },
+      async remove(key) { delete session[key]; }
+    }
   },
   runtime: { id, getURL: path => `chrome-extension://${id}/${path}`, onInstalled: { addListener() {} }, onMessage: { addListener(fn) { handler = fn; } }, async openOptionsPage() {}, async getPlatformInfo() { return {}; } },
   contextMenus: { onClicked: { addListener() {} } },
-  permissions: { async contains() { return allow; } }
+  permissions: { async contains() { return allow; } },
+  sidePanel: { async open(value) { panelOpened = value; } }
 };
 globalThis.fetch = async (_url, options) => { requestCount++; requestBody = JSON.parse(options.body); return Response.json({ choices: [{ message: { content: JSON.stringify(EXAMPLE.result) } }] }); };
 await import('../background.js');
@@ -31,30 +37,47 @@ test('secrets are isolated; public preferences accessible but settings/library w
   const publicData = await send({ type: 'PUBLIC_SETTINGS' }, content); assert(publicData.ok); assert(!JSON.stringify(publicData).includes('private-secret'));
   for (const type of ['GET_SETTINGS', 'LIBRARY', 'DELETE_KEY', 'SET_SETTINGS', 'REMOVE_SAVED']) assert.equal((await send({ type }, content)).error.code, 'DENIED');
   assert.equal((await send({ type: 'GET_SETTINGS' })).data.apiKey, 'private-secret');
+  assert.equal(storage.settings, undefined); assert.equal(storage.configuration.providers[0].apiKey, 'private-secret');
   assert.equal((await send({ type: 'GET_SETTINGS' }, { ...page, tab: { id: 2 } })).data.apiKey, 'private-secret');
   assert.equal((await send({ type: 'GET_SETTINGS' }, { ...page, id: 'another-extension' })).error.code, 'DENIED');
+});
+test('side-panel handoff preserves current window and frame text without a premature AI request', async () => {
+  const before = requestCount;
+  const response = await send({ type: 'OPEN_READING_PANEL', text: '左右对照', context: '本地语境', mode: 'explain' }, { ...content, tab: { id: 1, windowId: 3 } });
+  assert(response.ok); assert.deepEqual(panelOpened, { tabId: 1 });
+  assert.equal(session['readingPanel:3'].text, '左右对照'); assert.equal(session['readingPanel:3'].mode, 'explain');
+  assert.equal(session['readingPanel:3'].context, ''); assert.equal(session['readingPanel:3'].thinkingEnabled, false);
+  assert.equal(requestCount, before);
+});
+test('a rejected native-panel open never dispatches a stale or duplicate query to another renderer', async () => {
+  const original = chrome.sidePanel.open;
+  const previous = structuredClone(session['readingPanel:3']);
+  chrome.sidePanel.open = async () => { throw new Error('user gesture required'); };
+  const response = await send({ type: 'OPEN_READING_PANEL', text: '不应派发', mode: 'translate' }, { ...content, tab: { id: 1, windowId: 3 } });
+  assert(!response.ok); assert.equal(response.error.code, 'PANEL'); assert.deepEqual(session['readingPanel:3'], previous);
+  chrome.sidePanel.open = original;
 });
 test('permission denial prevents network requests and missing API key produces clear setup error', async () => {
   const count = requestCount; allow = false;
   assert.equal((await send({ type: 'ANALYZE', text: '学' })).error.code, 'PERMISSION'); assert.equal(requestCount, count);
-  allow = true; storage.settings.apiKey = '';
+  allow = true; storage.configuration.providers[0].apiKey = '';
   assert.equal((await send({ type: 'ANALYZE', text: '学' })).error.code, 'SETTINGS');
-  storage.settings.apiKey = 'private-secret';
+  storage.configuration.providers[0].apiKey = 'private-secret';
 });
 test('context is opt-in on the backend; page-supplied endpoint cannot redirect the API key', async () => {
   let fetchedURL; const original = globalThis.fetch;
   globalThis.fetch = async (url, options) => { fetchedURL = url; return original(url, options); };
   const response = await send({ type: 'ANALYZE', text: '穷', context: 'nearby private text', endpoint: 'https://evil.test' }, content);
   assert(response.ok); assert.equal(JSON.parse(requestBody.messages[1].content).context, '未提供，请保留歧义。'); assert.equal(fetchedURL, 'https://api.deepseek.com/chat/completions');
-  storage.settings.includeContext = true;
+  storage.configuration.preferences.includeContext = true;
   await send({ type: 'ANALYZE', text: '穷', context: '水穷处' }, content);
   assert.equal(JSON.parse(requestBody.messages[1].content).context, '水穷处');
   globalThis.fetch = original;
 });
 test('paused selection queries blocked while manual trusted-page queries remain available', async () => {
-  storage.settings.enabled = false;
+  storage.configuration.preferences.enabled = false;
   assert.equal((await send({ type: 'ANALYZE', text: '学' }, content)).error.code, 'DISABLED');
-  assert((await send({ type: 'ANALYZE', text: '学' })).ok); storage.settings.enabled = true;
+  assert((await send({ type: 'ANALYZE', text: '学' })).ok); storage.configuration.preferences.enabled = true;
 });
 test('save only actual result IDs; deduplicate repeated saves and serialize concurrent storage mutations', async () => {
   assert.equal((await send({ type: 'SAVE_ENTRY', id: 'invented-result', result: { unsafe: true } }, content)).error.code, 'MISSING');
@@ -72,20 +95,132 @@ test('cancel is scoped to the originating document and frame', async () => {
   globalThis.fetch = async (_url, { signal }) => new Promise((_resolve, reject) => {
     started(); signal.addEventListener('abort', () => reject(new DOMException('internal secret', 'AbortError')), { once: true });
   });
-  const request = send({ type: 'ANALYZE', id: 'cancel-me', text: '学' }, content); await starting;
+  const request = send({ type: 'ANALYZE', id: 'cancel-me', text: '取消测试' }, content); await starting;
   await send({ type: 'CANCEL', id: 'cancel-me' }, { ...content, frameId: 1 });
   await send({ type: 'CANCEL', id: 'cancel-me' }, content);
   const response = await request; assert(!response.ok); assert.equal(response.error.code, 'TIMEOUT'); assert(!JSON.stringify(response).includes('internal secret'));
+  assert(!(session.analysisCache || []).some(item => item.entry.text === '取消测试'));
   globalThis.fetch = original;
 });
 test('raw provider failures cannot leak secrets through error responses', async () => {
   const original = globalThis.fetch; globalThis.fetch = async () => { throw new Error('private-secret'); };
-  const response = await send({ type: 'ANALYZE', text: '学' }, content); assert.equal(response.error.code, 'NETWORK'); assert(!JSON.stringify(response).includes('private-secret'));
+  const response = await send({ type: 'ANALYZE', text: '网络失败测试' }, content); assert.equal(response.error.code, 'NETWORK'); assert(!JSON.stringify(response).includes('private-secret'));
   globalThis.fetch = original;
+});
+test('all reading modes reuse one successful result and cache hits remain saveable', async () => {
+  const before = requestCount;
+  const first = await send({ type: 'ANALYZE', text: '切换缓存测试', mode: 'translate' });
+  const second = await send({ type: 'ANALYZE', text: '切换缓存测试', mode: 'explain' }, content);
+  const third = await send({ type: 'ANALYZE', text: '切换缓存测试', mode: 'appreciate' });
+  assert(first.ok && second.ok && third.ok); assert.equal(requestCount, before + 1);
+  assert.equal(first.data.id, second.data.id); assert.equal(first.data.id, third.data.id);
+  storage.recent = [];
+  assert((await send({ type: 'SAVE_ENTRY', id: third.data.id }, content)).ok);
+  assert(!JSON.stringify(session).includes('private-secret'));
+});
+test('context, model, endpoint, credentials and explicit regeneration cannot reuse an unrelated cache entry', async () => {
+  const original = structuredClone(storage.configuration);
+  const before = requestCount;
+  const text = '缓存隔离测试';
+  for (const context of ['上下文甲', '上下文乙']) assert((await send({ type: 'ANALYZE', text, context })).ok);
+  for (const [key, value] of [['model', 'another-model'], ['baseUrl', 'https://another-provider.test/v1'], ['apiKey', 'another-secret']]) {
+    storage.configuration.providers[0][key] = value; assert((await send({ type: 'ANALYZE', text, context: '上下文乙' })).ok);
+  }
+  assert((await send({ type: 'ANALYZE', text, context: '上下文乙', force: true })).ok);
+  assert.equal(requestCount, before + 6);
+  storage.configuration = original;
+});
+test('failed and cancelled generations are not cached; clearing recent readings clears temporary results', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => { requestCount++; return new Response('failed', { status: 500 }); };
+  const before = requestCount;
+  assert(!(await send({ type: 'ANALYZE', text: '不缓存错误' })).ok);
+  assert(!(await send({ type: 'ANALYZE', text: '不缓存错误' })).ok);
+  assert.equal(requestCount, before + 2);
+  globalThis.fetch = original;
+  const a = await send({ type: 'ANALYZE', text: '清空缓存测试' }); assert(a.ok);
+  await send({ type: 'CLEAR_RECENT' }); assert(!session.analysisCache);
+  const b = await send({ type: 'ANALYZE', text: '清空缓存测试' }); assert(b.ok); assert.notEqual(a.data.id, b.data.id);
 });
 test('an immediate cancellation during settings lookup stops before any network request', async () => {
   const count = requestCount;
   const request = send({ type: 'ANALYZE', id: 'early-cancel', text: '学' }, content);
   await send({ type: 'CANCEL', id: 'early-cancel' }, content);
   const response = await request; assert(!response.ok); assert.equal(response.error.code, 'CANCELLED'); assert.equal(requestCount, count);
+});
+test('thinking and docked-reading switches persist and affect the actual DeepSeek request', async () => {
+  const settings = { ...DEFAULT_SETTINGS, apiKey: 'private-secret', thinkingEnabled: true, dockedReading: true };
+  assert((await send({ type: 'SET_SETTINGS', settings })).ok);
+  assert.equal((await send({ type: 'GET_SETTINGS' })).data.thinkingEnabled, true);
+  assert.equal((await send({ type: 'PUBLIC_SETTINGS' }, content)).data.thinkingEnabled, true);
+  assert((await send({ type: 'ANALYZE', text: '开启深度思考测试' })).ok);
+  assert.deepEqual(requestBody.thinking, { type: 'enabled' }); assert.equal(requestBody.max_tokens, 32768);
+  settings.thinkingEnabled = false;
+  assert((await send({ type: 'SET_SETTINGS', settings })).ok);
+  assert.equal((await send({ type: 'GET_SETTINGS' })).data.thinkingEnabled, false);
+  assert((await send({ type: 'ANALYZE', text: '关闭深度思考测试' })).ok);
+  assert.deepEqual(requestBody.thinking, { type: 'disabled' }); assert.equal(requestBody.max_tokens, 8192);
+});
+
+test('multiple configurations persist independently; selecting never calls AI or clears completed cache', async () => {
+  const configuration = structuredClone(storage.configuration);
+  configuration.providers = ['deepseek', 'openai', 'qwen'].map((kind, i) => ({ id: kind, name: ['DeepSeek', 'OpenAI', '通义千问'][i], kind, baseUrl: ['https://api.deepseek.com', 'https://api.openai.com/v1', 'https://dashscope.aliyuncs.com/compatible-mode/v1'][i], model: ['deepseek-flash', 'gpt-4.1-mini', 'qwen-flash'][i], apiKey: `${kind}-test-secret`, thinkingEnabled: false, jsonMode: false }));
+  configuration.activeProviderId = 'deepseek';
+  const originalFetch = globalThis.fetch, calls = [];
+  globalThis.fetch = async (url, options) => { calls.push({ url, key: options.headers.Authorization }); return originalFetch(url, options); };
+  assert((await send({ type: 'SET_CONFIGURATION', configuration })).ok);
+  const results = [];
+  for (const providerId of ['deepseek', 'openai', 'qwen']) {
+    const count = calls.length;
+    assert((await send({ type: 'SELECT_PROVIDER', providerId }, content)).ok); assert.equal(calls.length, count);
+    const response = await send({ type: 'ANALYZE', text: '多服务隔离' }); assert(response.ok);
+    results.push(response.data);
+    assert.equal(response.data.providerId, providerId); assert.equal(calls.at(-1).key, `Bearer ${providerId}-test-secret`);
+    assert((await send({ type: 'SAVE_ENTRY', id: response.data.id })).ok);
+  }
+  assert.equal(new Set(results.map(r => r.id)).size, 3);
+  const count = calls.length;
+  const cached = await send({ type: 'ANALYZE', providerId: 'deepseek', text: '多服务隔离' });
+  assert(cached.ok); assert.equal(cached.data.id, results[0].id); assert.equal(calls.length, count);
+  assert(!JSON.stringify(await send({ type: 'PUBLIC_SETTINGS' }, content)).includes('test-secret'));
+  assert.equal((await send({ type: 'GET_CONFIGURATION' }, content)).error.code, 'DENIED');
+  assert((await send({ type: 'DELETE_KEY', providerId: 'openai' })).ok);
+  const saved = (await send({ type: 'GET_CONFIGURATION' })).data;
+  assert.equal(saved.providers[1].apiKey, ''); assert.equal(saved.providers[0].apiKey, 'deepseek-test-secret'); assert.equal(saved.providers[2].apiKey, 'qwen-test-secret');
+  assert.equal((await send({ type: 'ANALYZE', text: '无密钥', providerId: 'openai' })).error.code, 'SETTINGS');
+  assert.equal((await send({ type: 'SELECT_PROVIDER', providerId: 'deleted' })).error.code, 'SETTINGS');
+  assert.equal((await send({ type: 'ANALYZE', text: '不允许回退', providerId: 'deleted' })).error.code, 'SETTINGS');
+  assert.equal(calls.length, count);
+  globalThis.fetch = originalFetch;
+});
+
+test('switching provider during generation preserves the request snapshot and provenance', async () => {
+  let release, started;
+  const starting = new Promise(resolve => { started = resolve; });
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => { started(); await new Promise(resolve => { release = resolve; }); return Response.json({ choices: [{ message: { content: JSON.stringify(EXAMPLE.result) } }] }); };
+  const pending = send({ type: 'ANALYZE', providerId: 'deepseek', text: '切换中保持来源', force: true });
+  await starting;
+  assert((await send({ type: 'SELECT_PROVIDER', providerId: 'qwen' })).ok);
+  release(); const response = await pending;
+  assert(response.ok); assert.equal(response.data.providerId, 'deepseek'); assert.equal(response.data.providerName, 'DeepSeek');
+  globalThis.fetch = original;
+});
+
+test('multi-provider saves require granted endpoint origins; revoked permissions also block cached results', async () => {
+  const configuration = structuredClone(storage.configuration);
+  const before = requestCount; allow = false;
+  assert.equal((await send({ type: 'SET_CONFIGURATION', configuration })).error.code, 'PERMISSION');
+  assert.deepEqual(storage.configuration, configuration);
+  assert.equal((await send({ type: 'ANALYZE', providerId: 'deepseek', text: '切换中保持来源' })).error.code, 'PERMISSION');
+  assert.equal(requestCount, before); allow = true;
+  const invalid = structuredClone(configuration); invalid.providers[1].id = invalid.providers[0].id;
+  assert.equal((await send({ type: 'SET_CONFIGURATION', configuration: invalid })).error.code, 'SETTINGS');
+  assert.deepEqual(storage.configuration, configuration);
+});
+
+test('native-panel handoff keeps the explicitly selected provider instead of substituting the global default', async () => {
+  const before = requestCount;
+  const response = await send({ type: 'OPEN_READING_PANEL', text: '明确选择', providerId: 'deepseek' }, { ...content, tab: { id: 1, windowId: 3 } });
+  assert(response.ok); assert.equal(session['readingPanel:3'].providerId, 'deepseek'); assert.equal(requestCount, before);
 });

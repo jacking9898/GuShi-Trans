@@ -1,6 +1,6 @@
 {
   "name": "shiwen-chrome-extension",
-  "version": "1.0.0",
+  "version": "1.0.5",
   "private": true,
   "type": "module",
   "description": "拾文 · AI 古诗文划词翻译与字词笺注",

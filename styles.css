@@ -45,6 +45,7 @@
 .sw-pinyin { margin-top: 5px !important; font: 12px/1.8 var(--sw-sans); letter-spacing: .35px; color: #7c785d; }
 .sw-feedback { font-size: 11px; color: var(--sw-accent); }
 .sw-feedback:not(:empty) { margin-top: 8px; }
+.sw-notice { padding: 12px 14px; margin-top: 16px !important; border: 1px solid #dfd4b6; border-radius: 6px; background: #f7f1e3; color: #806238; font-size: 12px; line-height: 1.8; }
 .sw-result-section { padding: 20px 0; border-bottom: 1px solid var(--sw-line); }
 .sw-section-heading { color: #6b755e; font: 600 11px/1.5 var(--sw-sans); letter-spacing: 1.5px; margin-bottom: 9px !important; }
 .sw-section-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
@@ -93,3 +94,17 @@
   .sw-icon-button { min-height: 40px; width: 40px; }.sw-button { min-height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) { .sw *, .sw *::before, .sw *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+
+.sw-provider-picker { padding: 12px 16px; border-bottom: 1px solid var(--sw-border, #dedfd4); }
+.sw-provider-row { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.sw-provider-row > span { flex: 0 0 auto; }
+.sw .sw-provider-select { flex: 1; min-width: 0; max-width: 100%; min-height: 40px; border: 1px solid var(--sw-border, #dedfd4); border-radius: 7px; padding: 7px 8px; background: var(--sw-paper, #faf9f6); color: inherit; font: inherit; font-size: 13px; text-overflow: ellipsis; }
+.sw-provider-note { line-height: 1.65; margin: 6px 0 0; overflow-wrap: anywhere; }
+.sw-provider-note:empty { display: none; }
+.sw-provider-source { font-size: 12px; color: var(--sw-muted, #72786d); margin: 0 0 14px; overflow-wrap: anywhere; }
+.sw-floating-dialog > .sw-provider-picker, .panel-page > .sw-provider-picker { flex-shrink: 0; }
+
+.sw .sw-settings-link { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; gap: 6px; min-height: 40px; padding: 7px 10px; white-space: nowrap; }
+.sw-provider-controls { display: flex; align-items: center; gap: 8px; }
+.sw-provider-controls .sw-provider-row { flex: 1; min-width: 0; }
+.sw .sw-provider-configure { flex: 0 0 auto; min-height: 40px; padding: 7px 10px; font-size: 12px; }

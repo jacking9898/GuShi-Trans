@@ -1,4 +1,4 @@
-import { el, icon, button, send, renderResult, loadingView, errorView, stopSpeech } from './lib/ui.js';
+import { el, icon, button, send, renderResult, loadingView, errorView, stopSpeech, providerPicker } from './lib/ui.js';
 import { resultToText } from './lib/core.js';
 import { EXAMPLE } from './lib/example.js';
 
@@ -9,11 +9,24 @@ $('expand').append(icon('arrow')); $('settings').append(icon('settings')); $('ex
 $('settings').onclick = $('setup').onclick = () => send('OPEN_OPTIONS').catch(showInputError);
 $('expand').onclick = () => chrome.tabs.create({ url: chrome.runtime.getURL('reader.html?wide=1') });
 let mode = 'translate', activeId = null, requestToken = 0, library = { saved: [], recent: [] }, currentTab = 'read';
+let currentEntry = null, currentExample = false, currentContext = '';
+let thinkingEnabled = false, selectedProviderId, picker;
+function updateProviders(data) {
+  selectedProviderId = data.activeProviderId;
+  if (data.fontSize) document.body.classList.toggle('sw-large', data.fontSize === 'large');
+  thinkingEnabled = data.providers.find(p => p.id === selectedProviderId)?.thinkingEnabled === true;
+  picker?.update(data);
+  $('setup-banner').hidden = data.providers.some(p => p.id === selectedProviderId && p.configured);
+}
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.configuration) send('PUBLIC_SETTINGS').then(updateProviders).catch(showInputError);
+});
 
 function showInputError(error) { $('query-error').textContent = error.message; }
 function setMode(value) {
   mode = value;
   for (const b of document.querySelectorAll('#query-form [data-mode]')) { b.classList.toggle('is-active', b.dataset.mode === mode); b.setAttribute('aria-pressed', String(b.dataset.mode === mode)); }
+  if (currentEntry && !$('result-area').hidden) displayEntry(currentEntry, currentExample, false);
 }
 for (const b of document.querySelectorAll('#query-form [data-mode]')) b.onclick = () => setMode(b.dataset.mode);
 for (const b of document.querySelectorAll('.sample-shortcuts [data-text]')) b.onclick = () => { $('query').value = b.dataset.text; updateCount(); setMode(b.dataset.mode); $('query').focus(); };
@@ -22,7 +35,7 @@ $('query').oninput = () => { updateCount(); $('query-error').textContent = ''; }
 $('query').onkeydown = event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && !event.isComposing) { event.preventDefault(); $('query-form').requestSubmit(); } };
 
 function cancel() { requestToken++; if (activeId) send('CANCEL', { id: activeId }).catch(() => {}); activeId = null; $('query-submit').disabled = false; $('query-submit').textContent = '读一读 ↗'; }
-function clearResult() { cancel(); stopSpeech(); $('result-area').replaceChildren(); $('result-area').hidden = true; $('welcome').hidden = false; $('query-heading').scrollIntoView({ block: 'start' }); }
+function clearResult() { cancel(); stopSpeech(); currentEntry = null; $('result-area').replaceChildren(); $('result-area').hidden = true; $('welcome').hidden = false; $('query-heading').scrollIntoView({ block: 'start' }); }
 function scrollToResult() { requestAnimationFrame(() => { if (currentTab === 'read' && !$('result-area').hidden) $('result-area').scrollIntoView({ block: 'start' }); }); }
 function backLine(label, callback) {
   const row = el('div', 'back-line'); const back = button('返回', 'back', 'sw-text-button sw-inline'); back.onclick = callback;
@@ -31,33 +44,41 @@ function backLine(label, callback) {
 function resultOptions(example = false) {
   return {
     example,
+    mode,
+    onRefresh: entry => {
+      const context = currentEntry?.id === entry.id ? currentContext : '';
+      switchTab('read'); $('query').value = entry.text; updateCount();
+      analyze(entry.text, mode, context, true);
+    },
     onSave: async entry => { await send('SAVE_ENTRY', { id: entry.id }); await loadLibrary(); },
     onCopy: entry => navigator.clipboard.writeText(resultToText(entry)),
     onWord: (text, context) => { $('query').value = text; updateCount(); setMode('explain'); switchTab('read'); analyze(text, 'explain', context); }
   };
 }
-function displayEntry(entry, example = false) {
+function displayEntry(entry, example = false, scroll = true) {
+  currentEntry = entry; currentExample = example;
   stopSpeech(); $('welcome').hidden = true; $('result-area').hidden = false;
   $('result-area').replaceChildren(backLine(example ? '先看一则示例，再读你的诗文' : '译注已完成', clearResult), renderResult(entry, resultOptions(example)));
-  scrollToResult();
+  if (scroll) scrollToResult();
 }
 
-async function analyze(text, selectedMode, context = '') {
+async function analyze(text, selectedMode, context = '', force = false) {
   if (!text.trim()) { showInputError(new Error('先写下想读的字词或诗文。')); $('query').focus(); return; }
   if ([...text.trim()].length > 1600) { showInputError(new Error('一次最多 1600 字，请分段阅读。')); return; }
   cancel(); stopSpeech(); const token = ++requestToken; const id = crypto.randomUUID(); activeId = id;
+  currentEntry = null; currentContext = context;
   $('query-error').textContent = ''; $('query-submit').disabled = true; $('query-submit').textContent = '推敲中…';
   $('welcome').hidden = true; $('result-area').hidden = false;
   const cancelButton = button('取消查询', '', 'sw-text-button'); cancelButton.onclick = clearResult;
-  $('result-area').replaceChildren(loadingView(text), cancelButton);
+  $('result-area').replaceChildren(loadingView(text, thinkingEnabled), cancelButton);
   scrollToResult();
   try {
-    const entry = await send('ANALYZE', { text, mode: selectedMode, context, id });
+    const entry = await send('ANALYZE', { text, mode: selectedMode, context, id, force, providerId: selectedProviderId });
     if (token !== requestToken) return;
     displayEntry(entry); await loadLibrary();
   } catch (error) {
     if (token !== requestToken) return;
-    $('result-area').replaceChildren(backLine('稍作调整，再读一遍', clearResult), errorView(error, () => analyze(text, selectedMode, context)));
+    $('result-area').replaceChildren(backLine('稍作调整，再读一遍', clearResult), errorView(error, () => analyze(text, mode, context, true)));
   } finally { if (token === requestToken) { activeId = null; $('query-submit').disabled = false; $('query-submit').textContent = '读一读 ↗'; } }
 }
 $('query-form').onsubmit = event => { event.preventDefault(); if (!activeId) analyze($('query').value, mode); };
@@ -79,7 +100,7 @@ function renderRecent() {
   const clear = button('清空记录', '', 'sw-text-button'); clear.onclick = async () => { try { await send('CLEAR_RECENT'); await loadLibrary(); } catch (e) { showInputError(e); } }; head.append(clear); root.append(head);
   for (const entry of library.recent.slice(0, 4)) {
     const row = button('', '', 'recent-row'); const time = el('time', '', new Date(entry.createdAt).toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }));
-    row.append(el('span', '', entry.text), time); row.onclick = () => { cancel(); displayEntry(entry); }; root.append(row);
+    row.append(el('span', '', entry.text), time); row.onclick = () => { cancel(); currentContext = ''; currentEntry = null; setMode(entry.mode); displayEntry(entry); }; root.append(row);
   }
 }
 function renderSaved() {
@@ -111,7 +132,9 @@ window.addEventListener('pagehide', () => { cancel(); stopSpeech(); });
 
 async function init() {
   try {
-    const settings = await send('GET_SETTINGS'); $('setup-banner').hidden = !!settings.apiKey;
+    const settings = await send('PUBLIC_SETTINGS');
+    picker = providerPicker(settings, updateProviders); $('query-form').prepend(picker.root); updateProviders(settings);
+    thinkingEnabled = settings.thinkingEnabled;
     document.body.classList.toggle('sw-large', settings.fontSize === 'large');
     await loadLibrary();
     if (new URLSearchParams(location.search).get('pending') === '1') {

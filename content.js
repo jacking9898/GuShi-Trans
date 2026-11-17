@@ -3,7 +3,10 @@
   globalThis.__shiwenLoaded = true;
   let ui, shadow, host, toolbar, dialog, body, modeBar, selectionData, activeId, disposed = false, initialization;
   let settings = { enabled: true, includeContext: false, fontSize: 'normal' };
-  let generation = 0, selectionTimer, refreshTimer, opener;
+  let generation = 0, selectionTimer, refreshTimer, opener, panelUnavailable = false;
+  let picker;
+  let queryKey = '', viewMode = 'translate', currentEntry = null, currentError = null;
+  const views = new Map(), scrollPositions = new Map();
   const modeLabels = { translate: '白话翻译', explain: '字词解释', appreciate: '诗文赏析' };
 
   async function init() {
@@ -29,9 +32,10 @@
     const top = ui.el('header', 'sw-floating-header');
     const brandText = ui.el('div', 'sw-inline'); brandText.append(ui.el('span', 'sw-seal sw-seal-small', '拾'), ui.el('strong', 'sw-brand-text', '拾文'), ui.el('span', 'sw-muted sw-small', '一字一句，皆有来处'));
     const controls = ui.el('div', 'sw-inline');
-    const config = ui.iconButton('打开拾文设置', 'settings'); config.onclick = () => ui.send('OPEN_OPTIONS').catch(() => {});
+    const config = ui.button('设置', 'settings', 'sw-button sw-settings-link'); config.setAttribute('aria-label', '打开拾文设置'); config.title = '打开拾文设置'; config.onclick = () => ui.send('OPEN_OPTIONS').catch(() => {});
     const closeButton = ui.iconButton('关闭译注（Esc）', 'close'); closeButton.onclick = close;
     controls.append(config, closeButton); top.append(brandText, controls); dialog.append(top);
+    picker = ui.providerPicker(settings, value => { settings = { ...settings, ...value, thinkingEnabled: value.providers.find(p => p.id === value.activeProviderId)?.thinkingEnabled === true }; }); dialog.append(picker.root);
     modeBar = ui.el('div', 'sw-modebar');
     for (const [mode, label] of Object.entries(modeLabels)) {
       const b = ui.button(label, '', 'sw-mode'); b.dataset.mode = mode; b.onclick = () => showQuery(selectionData, mode); modeBar.append(b);
@@ -41,7 +45,7 @@
       if (e.key === 'Escape') { e.stopPropagation(); close(); }
       if (e.key === 'Tab' && !dialog.hidden) {
         // Keep keyboard navigation inside the open reading panel.
-        const focusable = [...dialog.querySelectorAll('button:not(:disabled), a[href], summary')].filter(n => n.getClientRects().length);
+        const focusable = [...dialog.querySelectorAll('button:not(:disabled), select:not(:disabled), a[href], summary')].filter(n => n.getClientRects().length);
         const first = focusable[0], last = focusable.at(-1), current = shadow.activeElement;
         if (e.shiftKey && (current === first || current === dialog)) { e.preventDefault(); last?.focus(); }
         else if (!e.shiftKey && current === last) { e.preventDefault(); first?.focus(); }
@@ -55,7 +59,12 @@
   async function refreshSettings() {
     try {
       const response = await chrome.runtime.sendMessage({ type: 'PUBLIC_SETTINGS' });
-      if (response?.ok) { settings = response.data; applyFont(); if (!settings.enabled) { if (toolbar) toolbar.hidden = true; close(); } }
+      if (response?.ok) {
+        const changed = settings.revision && settings.revision !== response.data.revision;
+        settings = response.data; applyFont(); picker?.update(settings);
+        if (changed) { close(); queryKey = ''; currentEntry = null; currentError = null; views.clear(); scrollPositions.clear(); panelUnavailable = false; }
+        if (!settings.enabled) { if (toolbar) toolbar.hidden = true; close(); }
+      }
     } catch { disposed = true; close(); host?.remove(); }
   }
   refreshSettings();
@@ -101,35 +110,63 @@
     toolbar.style.top = `${Math.max(8, top + 44 > innerHeight ? data.rect.top - 50 : top)}px`;
   }
 
-  async function showQuery(data, mode = 'translate') {
+  function showResult() {
+    if (!views.has(viewMode)) views.set(viewMode, ui.renderResult(currentEntry, {
+      mode: viewMode,
+      onWord: (text, context) => showQuery({ text, context }, 'explain'),
+      onSave: e => ui.send('SAVE_ENTRY', { id: e.id }),
+      onCopy: async e => navigator.clipboard.writeText(formatted(e)),
+      onRefresh: () => showQuery(selectionData, viewMode, true)
+    }));
+    body.replaceChildren(views.get(viewMode)); body.scrollTop = scrollPositions.get(viewMode) || 0;
+  }
+
+  async function showQuery(data, mode = 'translate', force = false) {
     if (!data?.text || disposed) return;
     await init();
     if (!settings.enabled) return;
-    if (activeId) ui.send('CANCEL', { id: activeId }).catch(() => {});
-    const token = ++generation;
-    const id = crypto.randomUUID(); activeId = id;
+    const context = settings.includeContext ? data.context || '' : '';
+    if (settings.dockedReading && (innerWidth >= 1024 || settings.sidePanelOpen || host.dataset.layout === 'sidepanel') && !panelUnavailable) {
+      toolbar.hidden = true;
+      try {
+        await ui.send('OPEN_READING_PANEL', { text: data.text, context, mode, force, providerId: settings.activeProviderId });
+        close(); settings.sidePanelOpen = true; host.dataset.layout = 'sidepanel'; return;
+      } catch { panelUnavailable = true; }
+    }
+    host.dataset.layout = 'floating';
+    const nextKey = JSON.stringify([data.text.trim(), context]);
+    const same = nextKey === queryKey;
+    if (same && currentEntry) scrollPositions.set(viewMode, body.scrollTop);
+    viewMode = mode; ui.stopSpeech();
     selectionData = data; toolbar.hidden = true;
     if (dialog.hidden) opener = document.activeElement;
+    const wasHidden = dialog.hidden;
     dialog.hidden = false;
+    if (wasHidden) dialog.focus({ preventScroll: true });
     for (const b of modeBar.children) { b.classList.toggle('is-active', b.dataset.mode === mode); b.setAttribute('aria-pressed', String(b.dataset.mode === mode)); }
-    body.replaceChildren(ui.loadingView(data.text)); body.scrollTop = 0;
+    if (same && !force) {
+      if (currentEntry) { showResult(); return; }
+      if (activeId) return; // Switching views never interrupts or duplicates this query.
+      if (currentError) { body.replaceChildren(ui.errorView(currentError, () => showQuery(data, viewMode, true))); return; }
+    }
+    if (activeId) ui.send('CANCEL', { id: activeId }).catch(() => {});
+    const token = ++generation;
+    const id = crypto.randomUUID(); activeId = id; queryKey = nextKey;
+    currentEntry = null; currentError = null; views.clear(); scrollPositions.clear();
+    body.replaceChildren(ui.loadingView(data.text, settings.thinkingEnabled)); body.scrollTop = 0;
     const cancel = ui.button('取消查询', '', 'sw-text-button'); cancel.onclick = close; body.append(cancel);
     dialog.focus({ preventScroll: true });
     try {
-      const entry = await ui.send('ANALYZE', { id, text: data.text, context: settings.includeContext ? data.context : '', mode });
+      const entry = await ui.send('ANALYZE', { id, text: data.text, context, mode, force, providerId: settings.activeProviderId });
       if (token !== generation) return;
-      body.replaceChildren(ui.renderResult(entry, {
-        onWord: (text, context) => showQuery({ text, context }, 'explain'),
-        onSave: e => ui.send('SAVE_ENTRY', { id: e.id }),
-        onCopy: async e => { const text = formatted(e); await navigator.clipboard.writeText(text); }
-      }));
-    } catch (error) { if (token === generation) body.replaceChildren(ui.errorView(error, () => showQuery(data, mode))); }
+      currentEntry = entry; showResult();
+    } catch (error) { if (token === generation) { currentError = error; body.replaceChildren(ui.errorView(error, () => showQuery(data, viewMode, true))); } }
     finally { if (activeId === id) activeId = null; }
   }
 
   function formatted(entry) {
     const r = entry.result;
-    return [entry.text, r.pinyin, r.translation, ...r.words.map(w => `${w.text}（${w.pinyin}）：${w.meaning}`), r.readingNote, r.origin, [r.source.title, r.source.author, r.source.dynasty, r.source.quote, r.source.note].filter(Boolean).join(' · '), r.appreciation, 'AI 译注，出处与字源待核对。'].filter(Boolean).join('\n\n');
+    return [entry.text, r.notice, r.pinyin, r.translation, ...r.words.map(w => `${w.text}（${w.pinyin}）：${w.meaning}`), r.readingNote, r.origin, [r.source.title, r.source.author, r.source.dynasty, r.source.quote, r.source.note].filter(Boolean).join(' · '), r.appreciation, 'AI 译注，出处与字源待核对。'].filter(Boolean).join('\n\n');
   }
 
   function close() {
@@ -160,6 +197,7 @@
   window.addEventListener('focus', () => { clearTimeout(refreshTimer); refreshTimer = setTimeout(refreshSettings, 80); });
   window.addEventListener('pagehide', close);
   chrome.runtime.onMessage.addListener((message, _sender, reply) => {
+    if (message.type === 'READING_PANEL_CLOSED') { settings.sidePanelOpen = false; if (host) delete host.dataset.layout; return; }
     if (message.type !== 'CONTEXT_QUERY') return;
     if (isEditable(document.activeElement)) { reply({ ok: false }); return; }
     refreshSettings().then(() => showQuery({ text: message.text, context: readSelection()?.context || message.text }, Object.hasOwn(modeLabels, message.mode) ? message.mode : 'translate')).catch(() => {});

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { endpointFrom, validateSettings, cleanRequest, parseResult, buildMessages, resultToText, DEFAULT_SETTINGS } from '../lib/core.js';
+import { endpointFrom, validateSettings, cleanRequest, parseResult, buildMessages, resultToText, DEFAULT_SETTINGS, requestPolicy, analysisKey } from '../lib/core.js';
 import { queryAI, readCompletion } from '../lib/ai.js';
 import { EXAMPLE } from '../lib/example.js';
 
@@ -30,6 +30,11 @@ test('untrusted selected text stays in a JSON user message; references and moder
   assert.equal(JSON.parse(messages[1].content).text, text); assert(!messages[0].content.includes(text));
   assert.match(messages[0].content, /不可信/); assert.match(messages[0].content, /历史拟音/); assert.match(messages[0].content, /出处待考/);
 });
+test('one complete analysis prompt is identical across all three presentation modes', () => {
+  const requests = ['translate', 'explain', 'appreciate'].map(mode => buildMessages(cleanRequest({ text: '一字一句', mode })));
+  assert.deepEqual(requests[0], requests[1]); assert.deepEqual(requests[0], requests[2]);
+  assert.match(requests[0][0].content, /完整提供白话翻译、字词解释和赏析/);
+});
 test('parses fenced JSON, normalizes missing optional fields, rejects empty or malformed results', () => {
   assert.deepEqual(parseResult('```json\n' + resultJSON + '\n```'), EXAMPLE.result);
   assert.deepEqual(parseResult('{"translation":"学习"}').words, []);
@@ -42,9 +47,11 @@ test('bounds nested arrays and strings, preserves malicious HTML only as inert t
 test('copy output contains reading notes, source qualifiers, and no credentials', () => {
   const output = resultToText(EXAMPLE); assert.match(output, /辨|读音/); assert.match(output, /待核对/); assert.match(output, /王维/); assert(!output.includes('apiKey'));
 });
-test('non-streaming compatible response and length cutoff', async () => {
+test('non-streaming compatible response keeps readable JSON even if provider marks its output limit', async () => {
   assert.deepEqual(await readCompletion(Response.json({ choices: [{ message: { content: resultJSON }, finish_reason: 'stop' }] })), EXAMPLE.result);
-  await assert.rejects(readCompletion(Response.json({ choices: [{ message: { content: resultJSON }, finish_reason: 'length' }] })), /截断/);
+  const result = await readCompletion(Response.json({ choices: [{ message: { content: resultJSON }, finish_reason: 'length' }] }));
+  assert.equal(result.translation, EXAMPLE.result.translation); assert.match(result.notice, /可能不完整/);
+  await assert.rejects(readCompletion(Response.json({ choices: [{ message: { content: '{"translation":' }, finish_reason: 'length' }] })), error => error.code === 'OUTPUT_LIMIT' && !error.message.includes('请缩短选文'));
 });
 test('SSE reader handles split UTF-8 and CRLF frames, reasoning deltas and final event without newline', async () => {
   const frames = [
@@ -61,7 +68,7 @@ test('stream errors and truncated streams surface actionable messages', async ()
   const response = data => new Response(data, { headers: { 'Content-Type': 'text/event-stream' } });
   await assert.rejects(readCompletion(response('data: {bad}\n')), /格式异常/);
   await assert.rejects(readCompletion(response('data: {"error":{"message":"secret"}}\n')), error => !error.message.includes('secret'));
-  await assert.rejects(readCompletion(response('data: {"choices":[{"finish_reason":"length"}]}\n')), /截断/);
+  await assert.rejects(readCompletion(response('data: {"choices":[{"finish_reason":"length"}]}\n')), /长度上限/);
 });
 test('posts only to configured endpoint with isolated bearer headers and opt-in JSON mode', async () => {
   const settings = { ...DEFAULT_SETTINGS, apiKey: 'test-secret', baseUrl: 'https://provider.test/v1' };
@@ -70,13 +77,61 @@ test('posts only to configured endpoint with isolated bearer headers and opt-in 
   await queryAI(settings, cleanRequest({ text: '学' }), new AbortController().signal, fakeFetch);
   assert.equal(captured.url, 'https://provider.test/v1/chat/completions'); assert.equal(captured.options.credentials, 'omit'); assert.equal(captured.options.redirect, 'error');
   assert.equal(captured.options.headers.Authorization, 'Bearer test-secret');
-  const payload = JSON.parse(captured.options.body); assert(!payload.response_format); assert.equal(payload.stream, true); assert.equal(payload.model, 'deepseek-chat');
+  const payload = JSON.parse(captured.options.body); assert(!payload.response_format); assert.equal(payload.stream, true); assert.equal(payload.model, 'deepseek-flash');
+  assert.equal(payload.max_tokens, 8192); assert(!('thinking' in payload));
   await queryAI({ ...settings, jsonMode: true }, cleanRequest({ text: '学' }), new AbortController().signal, fakeFetch);
   assert.deepEqual(JSON.parse(captured.options.body).response_format, { type: 'json_object' });
+});
+test('DeepSeek defaults to explicit non-thinking and exposes a bounded opt-in thinking policy', async () => {
+  const settings = { ...DEFAULT_SETTINGS, apiKey: 'test-secret' };
+  const payloads = [];
+  const fakeFetch = async (_url, options) => { payloads.push(JSON.parse(options.body)); return Response.json({ choices: [{ message: { content: resultJSON } }] }); };
+  await queryAI(settings, cleanRequest({ text: '玲珑骰子安红豆' }), new AbortController().signal, fakeFetch);
+  await queryAI({ ...settings, thinkingEnabled: true }, cleanRequest({ text: '玲珑骰子安红豆' }), new AbortController().signal, fakeFetch);
+  assert.deepEqual(payloads[0].thinking, { type: 'disabled' }); assert.equal(payloads[0].max_tokens, 8192);
+  assert.deepEqual(payloads[1].thinking, { type: 'enabled' }); assert.equal(payloads[1].max_tokens, 32768);
+  assert.equal(requestPolicy(settings).timeoutMs, 65000); assert.equal(requestPolicy({ ...settings, thinkingEnabled: true }).timeoutMs, 180000);
+  assert.notEqual(await analysisKey(settings, { text: '字', context: '' }), await analysisKey({ ...settings, thinkingEnabled: true }, { text: '字', context: '' }));
+  assert.throws(() => validateSettings({ ...settings, baseUrl: 'https://other.test/v1', thinkingEnabled: true }), /不支持深度思考/);
+});
+test('reasoning-only exhaustion is explained without exposing reasoning text in either protocol', async () => {
+  const reasoning = 'private reasoning that must not be shown';
+  await assert.rejects(readCompletion(Response.json({ choices: [{ message: { content: '', reasoning_content: reasoning }, finish_reason: 'length' }] })), error => error.code === 'OUTPUT_LIMIT' && error.message.includes('深度思考') && !error.message.includes(reasoning));
+  const data = `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: reasoning } }] })}\n\ndata: {"choices":[{"finish_reason":"length"}]}\n\n`;
+  await assert.rejects(readCompletion(new Response(data, { headers: { 'Content-Type': 'text/event-stream' } })), /深度思考已用完/);
+});
+test('streamed valid JSON at the output limit remains readable with a visible qualification', async () => {
+  const data = `data: ${JSON.stringify({ choices: [{ delta: { content: resultJSON } }] })}\n\ndata: {"choices":[{"finish_reason":"length"}]}\n\n`;
+  const result = await readCompletion(new Response(data, { headers: { 'Content-Type': 'text/event-stream' } }));
+  assert.equal(result.translation, EXAMPLE.result.translation); assert.match(result.notice, /可能不完整/);
 });
 test('API status errors never echo arbitrary provider responses or secrets', async () => {
   const settings = { ...DEFAULT_SETTINGS, apiKey: 'test-secret' };
   for (const status of [400, 401, 402, 403, 404, 429, 500]) {
     await assert.rejects(queryAI(settings, { text: '学', mode: 'explain' }, new AbortController().signal, async () => new Response('api-key-should-never-leak', { status })), error => error.code === 'API' && !error.message.includes('api-key-should-never-leak'));
   }
+});
+
+test('400 diagnostics explain only recognized parameter names and never reflect raw messages or credential-like fields', async () => {
+  const settings = { ...DEFAULT_SETTINGS, apiKey: 'private-credential', baseUrl: 'https://api.openai.com/v1', model: 'gpt-6-luna' };
+  for (const [param, expected] of [['max_tokens', /max_tokens/], ['max_completion_tokens', /max_completion_tokens/], ['reasoning_effort', /reasoning_effort/], ['response_format', /严格 JSON 模式/], ['model', /模型名称/], ['private-credential', /HTTP 400/]]) {
+    let calls = 0;
+    await assert.rejects(queryAI(settings, { text: '学' }, new AbortController().signal, async () => {
+      calls++;
+      return Response.json({ error: { code: 'unsupported_parameter', param, message: 'Reflected key private-credential and private selected text', secret: 'private-credential' } }, { status: 400 });
+    }), error => error.code === 'API' && expected.test(error.message) && !/private-credential|private selected text/.test(error.message));
+    assert.equal(calls, 1, 'parameter rejection must not silently create a second paid request');
+  }
+});
+test('API model and quota errors are distinct; unknown provider errors remain sanitized', async () => {
+  const settings = { ...DEFAULT_SETTINGS, apiKey: 'private-credential' };
+  for (const [status, code, expected] of [[404, 'model_not_found', /API 项目无权使用/], [429, 'insufficient_quota', /账户额度不足/], [400, 'unknown-private-credential', /HTTP 400/]]) {
+    await assert.rejects(queryAI(settings, { text: '学' }, new AbortController().signal, async () => Response.json({ error: { code, message: 'private-credential' } }, { status })), error => expected.test(error.message) && !error.message.includes('private-credential'));
+  }
+});
+test('oversized error bodies are bounded and canceled without reflecting provider content', async () => {
+  let canceled = false;
+  const stream = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('private-credential'.repeat(2000))); }, cancel() { canceled = true; } });
+  await assert.rejects(queryAI({ ...DEFAULT_SETTINGS, apiKey: 'private-credential' }, { text: '学' }, new AbortController().signal, async () => new Response(stream, { status: 400 })), error => error.code === 'API' && /HTTP 400/.test(error.message) && !error.message.includes('private-credential'));
+  assert(canceled);
 });
